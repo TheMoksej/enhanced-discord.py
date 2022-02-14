@@ -202,12 +202,6 @@ class ConnectionState:
         if not intents.guilds:
             _log.warning("Guilds intent seems to be disabled. This may cause state related issues.")
 
-        self._chunk_guilds: bool = options.get("chunk_guilds_at_startup", intents.members)
-
-        # Ensure these two are set properly
-        if not intents.members and self._chunk_guilds:
-            raise ValueError("Intents.members must be enabled to chunk guilds at startup.")
-
         cache_flags = options.get("member_cache_flags", None)
         if cache_flags is None:
             cache_flags = MemberCacheFlags.from_intents(intents)
@@ -462,10 +456,6 @@ class ConnectionState:
         self._add_guild(guild)
         return guild
 
-    def _guild_needs_chunking(self, guild: Guild) -> bool:
-        # If presences are enabled then we get back the old guild.large behaviour
-        return self._chunk_guilds and not guild.chunked and not (self._intents.presences and not guild.large)
-
     def _get_guild_channel(self, data: MessagePayload) -> Tuple[Union[Channel, Thread], Optional[Guild]]:
         channel_id = int(data["channel_id"])
         try:
@@ -518,14 +508,10 @@ class ConnectionState:
                 except asyncio.TimeoutError:
                     break
                 else:
-                    if self._guild_needs_chunking(guild):
-                        future = await self.chunk_guild(guild, wait=False)
-                        states.append((guild, future))
+                    if guild.unavailable is False:
+                        self.dispatch("guild_available", guild)
                     else:
-                        if guild.unavailable is False:
-                            self.dispatch("guild_available", guild)
-                        else:
-                            self.dispatch("guild_join", guild)
+                        self.dispatch("guild_join", guild)
 
             for guild, future in states:
                 try:
@@ -1097,10 +1083,6 @@ class ConnectionState:
             # If we're waiting for the event, put the rest on hold
             return
 
-        # check if it requires chunking
-        if self._guild_needs_chunking(guild):
-            asyncio.create_task(self._chunk_and_dispatch(guild, unavailable))
-            return
 
         # Dispatch available if newly available
         if unavailable is False:
@@ -1461,23 +1443,8 @@ class AutoShardedConnectionState(ConnectionState):
             except asyncio.TimeoutError:
                 break
             else:
-                if self._guild_needs_chunking(guild):
-                    _log.debug("Guild ID %d requires chunking, will be done in the background.", guild.id)
-                    if len(current_bucket) >= max_concurrency:
-                        try:
-                            await utils.sane_wait_for(current_bucket, timeout=max_concurrency * 70.0)
-                        except asyncio.TimeoutError:
-                            fmt = "Shard ID %s failed to wait for chunks from a sub-bucket with length %d"
-                            _log.warning(fmt, guild.shard_id, len(current_bucket))
-                        finally:
-                            current_bucket = []
-
-                    # Chunk the guild in the background while we wait for GUILD_CREATE streaming
-                    future = asyncio.ensure_future(self.chunk_guild(guild))
-                    current_bucket.append(future)
-                else:
-                    future = self.loop.create_future()
-                    future.set_result([])
+                future = self.loop.create_future()
+                future.set_result([])
 
                 processed.append((guild, future))
 
